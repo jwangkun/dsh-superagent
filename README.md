@@ -10,6 +10,57 @@ dsh-superagent is a proactive coding agent for one GitHub repository, packaged a
 
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
 
+## Install
+
+dsh-superagent is a DSH bundle: `dsh plugin` installs it into one profile, next to the plugins that profile already loads.
+
+### Requirements
+
+- [DeepSeek Harness](https://www.deepseek.com/en/harness/) 0.2.1-alpha.2 or later. The desktop app 0.2.1-rc.5 is known to work.
+- `gh` 2.48 or later and `git` 2.32 or later on `PATH`: the GitHub Source calls `gh`, and ticket checkouts use `git`.
+- Optional, only for the Feishu Source: `lark-cli` and a Feishu or Lark app with a bot.
+
+Node.js 22.19+ or 24+ is needed only when you build from source; the release tarball ships the built `lib/`.
+
+### From the release (recommended)
+
+```sh
+dsh plugin --profile <profile> add \
+  https://github.com/jwangkun/dsh-superagent/releases/latest/download/dsh-superagent.tgz
+```
+
+### From a local tarball
+
+```sh
+dsh plugin --profile <profile> add ./dsh-superagent-<version>.tgz
+```
+
+### Restart and open the panel
+
+Restart that profile — quit and reopen the desktop app, or restart `dsh web` — then choose **Superagent** in the sidebar.
+
+The bundle ships a default state directory, `<DSH_HOME>/state/dsh-superagent`, for its database, locks, worker shims and ticket directories. To keep it elsewhere, add this to the profile's `cordis.patch.yml` before the first start:
+
+```yaml
+- id: dsh-superagent
+  config:
+    stateDir: /absolute/path
+```
+
+`stateDir` cannot change after the first start.
+
+### Configure it
+
+Open **Superagent** and fill in:
+
+1. **Sources → GitHub**: the repository as `owner/name`, and the `gh` CLI the agent acts as. The agent comments, pushes and opens pull requests as that account, so it needs write access; a dedicated account keeps its work distinguishable from yours.
+2. **Policy**: the GitHub logins allowed to ask for work. Until the list has someone, no request can become a ticket.
+3. **Execution**: the ticket directory root and a `prepare` command that gives each ticket its own checkout, for example a `git worktree` of a local clone.
+
+Then ask for work from an allowed account: open an Issue or comment on one, mentioning the agent, for example `@<agent-login> fix the typo in the README`. With [shared-account mode](#shared-account-mode), the comment must *start* with the mention.
+
+[docs/006-deployment.md](docs/006-deployment.md) covers the accounts, the `prepare` command template, upgrades and troubleshooting; [SETUP.md](SETUP.md) is the guided setup an agent can follow with you.
+
 ## Setup
 
 Setup has many steps, so an agent does it with you. Ask your coding agent:
@@ -39,13 +90,9 @@ This copy adds two changes on top of the upstream research prototype, for using 
 - **One account can request and act.** A message the agent's own account writes counts as that account's explicit request when it *starts* with `@<login>`; its other messages (acknowledgements, progress, results) are still ignored, so the agent cannot trigger itself in a loop.
 - **The worker environment stays out of the host process.** `PATH`, `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM` are applied only for the setup check and restored at once. Installing the bundle into a profile you also use for other Sessions no longer changes their git or `PATH`; worker sessions use the operator's own CLI and git configuration, which one shared account makes equivalent.
 
-Install the packaged tarball into a profile:
+### Shared-account mode
 
-```sh
-dsh plugin --profile <profile> add ./dsh-superagent-<version>.tgz
-```
-
-The bundle ships a default `stateDir` of `<DSH_HOME>/state/dsh-superagent`; override it in the profile's `cordis.patch.yml` with `- id: dsh-superagent` + `config.stateDir` to keep the database somewhere else.
+When the agent and the people asking share one GitHub account, mentioning yourself sends no notification, so the Source cannot rely on the account's notifications. Turn on **Receive new Issues** and **Receive comments in the repository** on the GitHub Source; it then reads the repository directly, and a comment that starts with the agent's mention becomes an explicit request. Messages of that account that do not start with the mention are treated as the agent's own output and ignored, which keeps acknowledgements and results from triggering new tickets.
 
 ## Development
 
