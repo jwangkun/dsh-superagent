@@ -340,6 +340,14 @@ describe('github source', () => {
     expect(commentTrigger({ id: 9, body: '@Agent-Bot please fix', user: { login: 'alice', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot')).toMatchObject({ human: true, addressed: 'mention' })
     expect(commentTrigger({ id: 10, body: 'mail@agent-bot.example', user: { login: 'alice', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot')).not.toHaveProperty('addressed')
     expect(commentTrigger({ id: 11, body: 'pushed', user: { login: 'Agent-Bot', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot').human).toBe(false)
+    // A shared account asks for work by starting its own message with the mention; its reports never start with one.
+    expect(commentTrigger({ id: 12, body: '  @agent-bot 修一下登录页的错别字', user: { login: 'Agent-Bot', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot')).toMatchObject({ human: true, addressed: 'mention' })
+    expect(commentTrigger({ id: 13, body: '完成，见 #8 @agent-bot', user: { login: 'Agent-Bot', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot').human).toBe(false)
+  })
+  it('lets a shared account open an Issue that names it first, and keeps its other Issues automated', () => {
+    const issue = (body: string) => issueTrigger({ number: 21, title: 't', body, user: { login: 'agent-bot', type: 'User' }, created_at: '2026-09-01T00:00:00Z', html_url: 'https://github.com/acme/widgets/issues/21' }, 'agent-bot')
+    expect(issue('@agent-bot 把设置页的按钮文案改短')).toMatchObject({ human: true, addressed: 'mention' })
+    expect(issue('A note about the settings page')).toMatchObject({ human: false })
   })
   it('reads the address of an Issue, a PR or a review comment of the repository, and nothing else', () => {
     expect(githubAddress('https://api.github.com/repos/acme/widgets/pulls/9', 'acme/widgets')).toEqual({ number: 9, pr: true })

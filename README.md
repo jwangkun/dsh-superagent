@@ -30,6 +30,21 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 
+## Fork notes / 本分支说明
+
+This copy adds two changes on top of the upstream research prototype, for using it inside a shared DSH profile with one GitHub account:
+
+- **One account can request and act.** A message the agent's own account writes counts as that account's explicit request when it *starts* with `@<login>`; its other messages (acknowledgements, progress, results) are still ignored, so the agent cannot trigger itself in a loop.
+- **The worker environment stays out of the host process.** `PATH`, `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM` are applied only for the setup check and restored at once. Installing the bundle into a profile you also use for other Sessions no longer changes their git or `PATH`; worker sessions use the operator's own CLI and git configuration, which one shared account makes equivalent.
+
+Install the packaged tarball into a profile:
+
+```sh
+dsh plugin --profile <profile> add ./dsh-superagent-<version>.tgz
+```
+
+The bundle ships a default `stateDir` of `<DSH_HOME>/state/dsh-superagent`; override it in the profile's `cordis.patch.yml` with `- id: dsh-superagent` + `config.stateDir` to keep the database somewhere else.
+
 ## Development
 
 `pnpm check` runs the typecheck, the tests and the build.

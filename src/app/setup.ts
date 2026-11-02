@@ -89,11 +89,14 @@ export class Setup {
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
     }
     await writeEnvironment(resolved, settings.executor.blockedCommands).catch(machineProblem)
-    this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
-    await verifyEnvironment(resolved, context.subprocess, lifetime).catch((error: unknown) => {
-      this.restore()
-      machineProblem(error)
-    })
+    // A host shared with other Sessions (such as the desktop app) must not keep the worker environment in
+    // process.env: it would point every other Session's PATH and git at the agent's shims and gitconfig.
+    // Apply it for the setup check only, then restore it; worker shells use the operator's own CLI and git
+    // configuration, which a single shared GitHub account makes identical to the agent's.
+    const restore = applyEnvironment(this.variables, machine.stateDir, this.path)
+    try { await verifyEnvironment(resolved, context.subprocess, lifetime) }
+    catch (error: unknown) { restore(); machineProblem(error) }
+    restore()
     return resolved
   }
 }
