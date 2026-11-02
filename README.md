@@ -22,7 +22,13 @@ dsh-superagent is a DSH bundle: `dsh plugin` installs it into one profile, next 
 
 Node.js 22.19+ or 24+ is needed only when you build from source; the release tarball ships the built `lib/`.
 
-### From the release (recommended)
+### From npm (recommended)
+
+```sh
+dsh plugin --profile <profile> add dsh-superagent
+```
+
+### From the release
 
 ```sh
 dsh plugin --profile <profile> add \
