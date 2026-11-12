@@ -5,11 +5,11 @@ import { sameName } from '../infra/text.ts'
 import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
 import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks } from './github-read.ts'
-import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, issueTrigger, IssueSchema, pullTrigger, selfRequest, SOURCE }
+import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, conflictTrigger, githubAddress, issueTrigger, IssueSchema, pullTrigger, revertTrigger, selfRequest, SOURCE }
   from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
 import type { GithubComment, PullRef } from './github-trigger.ts'
-import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
+import { observePull, pullsOf, readPull, enforceAutoMerge, type Pull } from './github-pull.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
 import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
@@ -25,7 +25,11 @@ const NotificationSchema = z.looseObject({
 const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false), observeComments: z.boolean().default(false),
-  observeCi: z.boolean().default(false) }).strict()
+  observeCi: z.boolean().default(false),
+  // Auto-merge is the Executor's request; these decide whether the Source lets it stand.
+  autoMerge: z.boolean().default(false), autoMergePaths: z.string().default(''), autoMergeMaxFiles: z.number().int().min(1).max(200).default(20),
+  // Minutes after a merge during which the default branch's checks are watched for a break; 0 watches nothing.
+  watchMergedMinutes: z.number().int().min(0).max(240).default(0) }).strict()
 export type GithubConfig = z.infer<typeof GithubConfigSchema>
 const OBSERVED = { issues: 'observeIssues', pulls: 'observePulls', comments: 'observeComments', ci: 'observeCi' } as const
 type Scope = keyof typeof OBSERVED
@@ -53,6 +57,14 @@ export const githubKind: SourceKind<GithubConfig> = {
       hint: { zh: '打开后，没有 @ 智能体的新 PR 也会收到，由策略的接收表决定是否成为候选。', en: 'New pull requests that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates.' } },
     { key: 'observeComments', type: 'switch', label: { zh: '接收仓库里的评论', en: 'Receive comments in the repository' },
       hint: { zh: '打开后，Issue 和 PR 上没有 @ 智能体的评论和代码评论也会收到，由策略的接收表决定是否成为候选。', en: 'Comments and review comments on Issues and PRs that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates.' } },
+    { key: 'autoMerge', type: 'switch', label: { zh: '允许自动合并', en: 'Allow auto-merge' },
+      hint: { zh: '关掉时，执行器开的自动合并会被撤销。打开后仍要满足下面的路径清单与文件数上限，系统才会让它留下——执行器只能「请求」自动合并，留下与否由这里决定。', en: 'While off, any auto-merge an Executor enables is withdrawn. While on, it stands only if every changed file matches the path list and the change stays under the file limit: the Executor may request auto-merge, but this decides whether it stands.' } },
+    { key: 'autoMergePaths', type: 'text', advanced: true, label: { zh: '可自动合并的路径', en: 'Paths that may auto-merge' },
+      hint: { zh: '每行一个，或逗号分隔；支持 * 与 **，例如 docs/*、src/**、README.md。留空表示任何路径都不允许自动合并。', en: 'One per line, or comma separated; `*` and `**` are supported, such as docs/*, src/**, README.md. Empty allows no path to auto-merge.' } },
+    { key: 'autoMergeMaxFiles', type: 'number', advanced: true, min: 1, max: 200, label: { zh: '自动合并的文件数上限', en: 'Files an auto-merge may change' },
+      hint: { zh: '超过这个数量的改动，即使路径都符合也不允许自动合并。', en: 'A change touching more files than this may not auto-merge, even when every path is allowed.' } },
+    { key: 'watchMergedMinutes', type: 'number', advanced: true, min: 0, max: 240, label: { zh: '合併後觀察期（分鐘）', en: 'Watch the default branch after a merge (minutes)' },
+      hint: { zh: '合併後這段時間內追蹤該合併 commit 的檢查；失敗時會發出一個「回退這個合併」的請求，由平常的流程評估並開回退 PR。0 表示不觀察。', en: 'For this long after a merge, the checks of the merge commit are watched; a failure asks for a revert through the ordinary pipeline, which assesses it and opens the revert pull request. 0 watches nothing.' } },
     { key: 'observeCi', type: 'switch', label: { zh: '接收默认分支的 CI', en: 'Receive the default branch\'s CI' },
       hint: { zh: '打开后，默认分支的 CI 失败和恢复会收到，由策略的接收表决定是否成为候选。', en: 'Failures of the default branch\'s CI, and its recovery, are received, and the Policy\'s admission table decides whether they become candidates.' } }],
   // What the Source observes across the repository it receives in full; elsewhere, only what addresses the agent.
@@ -285,6 +297,7 @@ export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promi
   const notified = await pollNotifications(ctx, round).then(value => ({ value }), (error: unknown) => ({ error }))
   await pollRepository(ctx, round)
   await pollTicketPulls(ctx, signal, round)
+  await pollMerged(ctx, round)
   await pollThreads(ctx, signal, round)
   if ('error' in notified) throw notified.error
   const { count, interval } = notified.value
@@ -413,7 +426,12 @@ export async function pollTicketPulls(ctx: SourceContext, signal?: AbortSignal, 
     if (stopped(ctx, round)) return
     try {
       const pr = await pull(ctx, round, number)
-      if (pr.state !== 'closed' && !pr.merged) await pollChecks(ctx, round, number, pr)
+      if (pr.state !== 'closed' && !pr.merged) {
+        await pollChecks(ctx, round, number, pr)
+        await pollMergeable(ctx, round, number, pr)
+        const config = ctx.config<GithubConfig>(SOURCE)
+        if (config) await enforceAutoMerge(ctx, number, pr, config, round.signal)
+      }
     } catch (error) { if (!stopped(ctx, round)) failed(ctx, round, number, error) }
   }
 }
@@ -427,6 +445,65 @@ async function pollChecks(ctx: SourceContext, round: Round, number: number, pr: 
   if (previous) await ctx.receive(ciTrigger(pr, revision, ciSummary(snapshot, `PR #${number}`, `github/pulls/${number}/checks`)))
   ctx.state.set(KV.github.ci(number), { fingerprint, revision })
   ctx.threads.describe(`github:${number}`, { facts: { ci: ciFact(ciCounts(snapshot)) } })
+}
+/**
+ * Watches the default branch for a while after a merge, and asks for a revert when that merge's own commit fails its checks.
+ * A merge that is green on its pull request can still break the branch it lands on, and nobody is watching the branch then.
+ */
+async function pollMerged(ctx: SourceContext, round: Round): Promise<void> {
+  const minutes = ctx.config<GithubConfig>(SOURCE)?.watchMergedMinutes ?? 0
+  if (!minutes) return
+  const now = Date.parse(round.started)
+  for (const name of ctx.state.keys(KV.github.merged as never)) {
+    const number = Number(name.slice(KV.github.merged.prefix.length))
+    const record = Number.isFinite(number) ? ctx.state.get(KV.github.merged(number)) : undefined
+    if (!record) continue
+    if (now - Date.parse(record.at) > minutes * 60_000) { ctx.state.set(KV.github.merged(number), undefined); continue }
+    if (stopped(ctx, round)) return
+    const snapshot = await pullChecks(ctx.commands.withSignal(round.signal), record.sha, round.tally)
+    const failures = ciFailures(snapshot)
+    if (!failures.length) {
+      if (record.failures?.length) ctx.state.set(KV.github.merged(number), { ...record, failures: [] })
+      continue
+    }
+    if (JSON.stringify(failures) === JSON.stringify(record.failures ?? [])) continue
+    ctx.state.set(KV.github.merged(number), { ...record, failures })
+    // A branch that was already red is not this merge's doing: compare with the merge's first parent before asking for a revert.
+    const commit = await ctx.commands.withSignal(round.signal).api(z.looseObject({ parents: z.array(z.looseObject({ sha: z.string() })) }), `commits/${record.sha}`)
+    const base = commit.parents[0]?.sha
+    const baseSnapshot = base ? await pullChecks(ctx.commands.withSignal(round.signal), base, round.tally) : undefined
+    const known = !!baseSnapshot && baseSnapshot.checks.length + (baseSnapshot.statuses?.length ?? 0) > 0
+    const before = baseSnapshot ? ciFailures(baseSnapshot) : []
+    const regression = known && JSON.stringify(before) !== JSON.stringify(failures)
+    const verdict = regression ? { zh: '失敗', en: 'failed' } : known ? { zh: '原本就失敗', en: 'already failing' } : { zh: '無法判定', en: 'unknown' }
+    ctx.threads.describe(`github:${number}`, { facts: { mergedCi: { label: { zh: '合併後 CI', en: 'CI after merge' }, value: verdict, problem: true } } })
+    // With no checks on the parent commit there is nothing to compare against, so report it and leave the decision to a person.
+    if (!regression) continue
+    await ctx.receive(revertTrigger({ number, html_url: `https://github.com/${ctx.deployment.repository}/pull/${number}`,
+      user: { login: ctx.deployment.github.login }, sha: record.sha },
+    `The merge of PR #${number} (commit ${record.sha.slice(0, 7)}) fails the default branch's checks: ${failures.slice(0, 5).join(', ')}. `
+    + 'Revert that merge on a new branch and open a pull request that reverts it, or report blocked with what you found.'))
+  }
+}
+/**
+ * Watches whether a ticket's PR still merges, and tells its Executor to rebase when it does not. Two Tickets whose workers
+ * changed the same file otherwise leave a conflict nobody notices until a person opens the pull request.
+ */
+async function pollMergeable(ctx: SourceContext, round: Round, number: number, pr: Pull): Promise<void> {
+  const previous = ctx.state.get(KV.github.mergeable(number))
+  const conflict = pr.mergeable === false
+  const fact = (value: 'conflict' | 'yes') => ctx.threads.describe(`github:${number}`,
+    { facts: { mergeable: { label: { zh: '可合併', en: 'Mergeable' }, value: value === 'conflict' ? { zh: '衝突', en: 'conflict' } : { zh: '是', en: 'yes' } } } })
+  if (!conflict) {
+    if (previous?.conflict) { ctx.state.set(KV.github.mergeable(number), { sha: pr.head.sha, conflict: false }); fact('yes') }
+    return
+  }
+  // One conflict per head commit: the Executor's own rebase moves the head, and a repeat of the same commit is not news.
+  if (previous?.conflict && previous.sha === pr.head.sha) return
+  ctx.state.set(KV.github.mergeable(number), { sha: pr.head.sha, conflict: true })
+  fact('conflict')
+  await ctx.receive(conflictTrigger(pr, `PR #${number} no longer merges into its base branch (state: ${pr.mergeable_state ?? 'dirty'}). `
+    + `Rebase this branch onto the latest base, resolve the conflicts, keep only this ticket's change, and push.`))
 }
 function nameThread(ctx: SourceContext, number: number, title: string): void {
   ctx.threads.patch(`github:${number}`, { title })
