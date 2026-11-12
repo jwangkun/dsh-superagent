@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+﻿import { describe, expect, it, vi } from 'vitest'
 import { Engine, MemoryRepositories, UserError, followupOwners, key, runningAssignment, ticketOutcome, ticketStage,
   waitsForPerson } from '../src/core/index.ts'
 import type { Assessor, Assignment, Candidate, EngineOptions, Executor, OutboundMessage, Outcome, Policy, Ticket, Trigger } from '../src/core/index.ts'
@@ -994,6 +994,25 @@ describe('automatic input', () => {
     h.tick(1); h.engine.report(ticketId, { state: 'blocked', summary: 'needs access' })
     h.engine.retryTicket(ticketId)
     expect(waitsForPerson(ticket())).toBe(false)
+  })
+    expect(ticketStage(generous.repo.tickets.get(blockedId)!)).toEqual({ stage: 'person', action: 'blocked' })
+  })
+  it('holds a part of a split request until the ticket it builds on ends, then starts it', () => {
+    const h = harness()
+    accepted(h, '1', 't1')
+    const parentId = h.repo.tickets.open()[0]!.id
+    h.engine.receive(trigger('2', { threads: [{ source: 'chat', id: 't2' }] })); h.pump()
+    h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Part two', scope: 'small', reason: 'requested', dependsOn: [parentId], parent: parentId })
+    h.settle()
+    const part = () => h.repo.tickets.open().find(ticket => ticket.title === 'Part two')!
+    // The part waits without an Assignment, so nothing of it runs before the part it builds on.
+    expect(part().assignments.length).toBe(0)
+    expect(ticketStage(part())).toEqual({ stage: 'working', action: 'queued' })
+    expect(part().parent).toBe(parentId)
+    // Ending the parent releases it with its own Assignment.
+    h.engine.stopTicket(parentId)
+    expect(part().assignments.length).toBe(1)
+    expect(h.executor.start).toHaveBeenCalled()
   })
   it('launches a failed launch again for a person\'s message, but not for a Policy change', () => {
     const h = harness()
