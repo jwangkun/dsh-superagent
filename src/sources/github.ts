@@ -48,7 +48,7 @@ export const githubKind: SourceKind<GithubConfig> = {
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
     { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络中断会在下一次轮询时自动重试，不必报告。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
     { key: 'observeIssues', type: 'switch', label: { zh: '接收仓库里的新 Issue', en: 'Receive new Issues in the repository' },
-      hint: { zh: '打开后，没有 @ 智能体的新 Issue 也会收到，由策略的接收表决定是否成为候选。从打开的时候开始，不读以前的。', en: 'New Issues that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates. Starts when switched on; earlier ones are not read.' } },
+      hint: { zh: '打开后，仓库里没有 @ 智能体的新 Issue 也会被读取，由策略的接收表决定是否成为候选；从打开的那一刻开始算，更早的不读。@ 智能体的 Issue 无论开关都会经由通知收到，这一项只管「没被 @ 的」。', en: 'Also reads new Issues in the repository that do not mention the agent, and the Policy\'s admission table decides whether they become candidates. Counted from the moment it is switched on; earlier ones are not read. An Issue that mentions the agent arrives through notifications either way, so this switch only covers the ones that do not.' } },
     { key: 'observePulls', type: 'switch', label: { zh: '接收仓库里的新 PR', en: 'Receive new pull requests in the repository' },
       hint: { zh: '打开后，没有 @ 智能体的新 PR 也会收到，由策略的接收表决定是否成为候选。', en: 'New pull requests that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates.' } },
     { key: 'observeComments', type: 'switch', label: { zh: '接收仓库里的评论', en: 'Receive comments in the repository' },
@@ -294,7 +294,12 @@ export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promi
   const dropped = (round.dropped.length ? `; deleted on GitHub: ${named(round.dropped)}` : '')
     + (round.abandoned.length ? `; dropped after their reads kept failing: ${named(round.abandoned)}` : '')
     + (round.tally.skipped ? `; ${round.tally.skipped} unreadable items skipped` : '')
-  ctx.report('github', { state: 'ready', detail: `${count} notifications; next poll ≥ ${interval}s${dropped}`, at: round.started })
+  // Say what else is being read: a quiet "0 notifications" otherwise looks like nothing is being scanned at all.
+  const config = ctx.config<GithubConfig>(SOURCE)
+  const scans = [...config?.observeIssues ? ['issues'] : [], ...config?.observePulls ? ['pull requests'] : [],
+    ...config?.observeComments ? ['comments'] : [], ...config?.observeCi ? ['default-branch CI'] : []]
+  const scan = scans.length ? `; also reading ${scans.join(', ')}` : '; notifications only'
+  ctx.report('github', { state: 'ready', detail: `${count} notifications${scan}; next poll ≥ ${interval}s${dropped}`, at: round.started })
   return interval
 }
 /** Reads notifications since the cursor and each Issue or PR they name, advancing the cursor atomically with the retry map for failed reads; deleted (410) Issues are dropped once their error is recorded. */
