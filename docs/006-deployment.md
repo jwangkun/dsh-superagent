@@ -145,6 +145,16 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
 1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+
+   Four switches add repository-wide reading on top of notifications, and each counts from the moment it is switched on — anything created earlier is not read:
+
+   - **Receive new Issues in the repository** and **Receive new pull requests in the repository** cover items that do not mention the agent; a mention arrives through notifications either way, so these switches only matter for the ones that do not.
+   - **Receive comments in the repository** does the same for conversation comments and review comments.
+   - **Receive the default branch's CI** adds failures of, and recovery from, the default branch's checks.
+
+   The Source's health line names what it is reading, for example `0 notifications; also reading issues in the repository`, so a quiet `0 notifications` is not mistaken for a Source that reads nothing. A repository-wide read also sees the item's author: the Policy's admission table decides whether an item that does not mention the agent becomes a candidate at all.
+
+   Items written by the agent account itself are ignored, from notifications and from the repository-wide reads alike: the agent does not answer its own activity, and GitHub does not notify an account about it either. File the request with a person's account — an Issue opened with the agent's own CLI looks like the agent talking to itself and produces nothing.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
