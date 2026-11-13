@@ -42,7 +42,18 @@ export type AssessmentOutcome =
   | { kind: 'unavailable'; reason: string | Reason; audit?: Record<string, unknown> }
   /** An accept: `rules` the assessment matched, `name` the ticket's requested short name, and `note` a routing note for its worker. */
   | { kind: 'accept'; title: string; scope: string; reason: string | Reason; acknowledgement?: string; rules?: string[]; audit?: Record<string, unknown>;
-    name?: string; note?: string }
+    name?: string; note?: string
+    /** Tickets that must end before this one starts, when one request is split into parts that build on each other. */
+    dependsOn?: string[]
+    /** The Ticket this one was split from, so the parts read as one piece of work. */
+    parent?: string
+    /**
+     * The parts of one request that is too large for a single Ticket, created instead of `title`/`scope`. A part's
+     * `dependsOn` indexes the parts before it, which become its Tickets' ids.
+     */
+    parts?: { title: string; scope: string; note?: string; name?: string; dependsOn?: number[] }[]
+    /** Every Ticket the split produced, recorded on each part so the group can be reported once. */
+    siblings?: string[] }
   | { kind: 'stop'; ticketId: string; reason: string | Reason; audit?: Record<string, unknown> }
 
 /** Semantic judgement. `request` queues the assessment, idempotently per `evalId`; the outcome returns through `Engine.decide`. */
@@ -89,6 +100,10 @@ export interface DomainEvents {
   'decision.recorded': { decisionId: string; kind: DecisionKind; threadKey: string }
   'ticket.created': { ticketId: string; decisionId: string; strength: Strength }
   'ticket.resumed': { ticketId: string; triggerId: string }
+  /** A part of a split request started because the last Ticket it built on ended. */
+  'ticket.released': { ticketId: string; after: string }
+  /** Every part of one split request has ended, so the main Session can report the group once instead of per part. */
+  'group.ended': { decisionId: string; parts: { id: string; title: string; outcome: TicketOutcome }[] }
   'ticket.ended': { ticketId: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
   'assignment.started': { ticketId: string; assignmentId: string }
   'assignment.ended': { ticketId: string; assignmentId: string; reason: string }

@@ -1619,3 +1619,66 @@ describe('ignores from the card', () => {
     expect(() => h.engine.decide('5', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'chat' })).toThrow(new UserError('notExplicit'))
   })
 })
+
+describe('task decomposition', () => {
+  it('holds a part of a split request until the ticket it builds on ends, then starts it', () => {
+    const h = harness()
+    accepted(h, '1', 't1')
+    const parentId = h.repo.tickets.open()[0]!.id
+    h.engine.receive(trigger('2', { threads: [{ source: 'chat', id: 't2' }] })); h.pump()
+    h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Part two', scope: 'small', reason: 'requested', dependsOn: [parentId], parent: parentId })
+    h.settle()
+    const part = () => h.repo.tickets.open().find(ticket => ticket.title === 'Part two')!
+    // The part waits without an Assignment, so nothing of it runs before the part it builds on.
+    expect(part().assignments.length).toBe(0)
+    expect(ticketStage(part())).toEqual({ stage: 'working', action: 'queued' })
+    expect(part().parent).toBe(parentId)
+    // Ending the parent releases it with its own Assignment.
+    h.engine.stopTicket(parentId)
+    expect(part().assignments.length).toBe(1)
+  })
+  it('creates one ticket per part of a split request and holds the later parts', () => {
+    const h = harness()
+    h.engine.receive(trigger('1', { threads: [{ source: 'chat', id: 't1' }] })); h.pump()
+    h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Whole request', scope: 'big', reason: 'requested',
+      parts: [{ title: 'Part one', scope: 'first half' }, { title: 'Part two', scope: 'second half', dependsOn: [0] }] })
+    h.settle()
+    const part = (title: string) => h.repo.tickets.open().find(ticket => ticket.title === title)!
+    expect(h.repo.tickets.open().map(ticket => ticket.title).sort()).toEqual(['Part one', 'Part two'])
+    expect(part('Part one').assignments.length).toBe(1)
+    expect(part('Part two').assignments.length).toBe(0)
+    expect(part('Part two').dependsOn).toEqual([part('Part one').id])
+    h.engine.stopTicket(part('Part one').id)
+    expect(part('Part two').assignments.length).toBe(1)
+  })
+  it('reports a split request once, when its last part ended', () => {
+    const events: { type: string; data: Record<string, unknown> }[] = []
+    const h = harness({}, { emit: event => events.push(event) })
+    h.engine.receive(trigger('1', { threads: [{ source: 'chat', id: 't1' }] })); h.pump()
+    h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Whole request', scope: 'big', reason: 'requested',
+      parts: [{ title: 'Part one', scope: 'first half' }, { title: 'Part two', scope: 'second half', dependsOn: [0] }] })
+    h.settle()
+    const part = (title: string) => h.repo.tickets.open().find(ticket => ticket.title === title)!
+    h.engine.stopTicket(part('Part one').id)
+    expect(events.filter(event => event.type === 'group.ended')).toHaveLength(0)
+    h.engine.stopTicket(part('Part two').id)
+    const group = events.filter(event => event.type === 'group.ended')
+    expect(group).toHaveLength(1)
+    expect((group[0]!.data.parts as unknown[]).length).toBe(2)
+  })
+  it('replaces a stuck ticket with smaller ones that keep its authority', () => {
+    const h = harness()
+    accepted(h, '1', 't1')
+    const original = h.repo.tickets.open()[0]!
+    const ids = h.engine.splitTicket(original.id, [{ title: 'Part one', scope: 'first half' },
+      { title: 'Part two', scope: 'second half', dependsOn: [0] }], 'too much at once')
+    expect(ids).toHaveLength(2)
+    expect(h.repo.tickets.get(original.id)!.ended).toMatchObject({ outcome: 'dropped', reason: 'too much at once' })
+    const [one, two] = ids.map(id => h.repo.tickets.get(id)!)
+    expect(one!.mandate.strength).toBe(original.mandate.strength)
+    expect(one!.siblings).toEqual(ids)
+    expect(two!.dependsOn).toEqual([one!.id])
+    expect(one!.assignments.length).toBe(1)
+    expect(two!.assignments.length).toBe(0)
+  })
+})

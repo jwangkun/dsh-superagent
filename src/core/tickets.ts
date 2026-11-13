@@ -41,18 +41,50 @@ export class Tickets extends EnginePart {
     const primary = this.repo.triggers.get(evaluation.primary ?? triggerIds.at(-1)!)
     const origin = { triggerId: primary?.id ?? triggerIds[0]!, triggerIds }
     let ticket: Ticket = { id, title: outcome.title, decisionId, mandate, channels: [], assignments: [], inputs: [], undelivered: [],
-      createdAt: at, updatedAt: at, origin }
+      createdAt: at, updatedAt: at, origin,
+      ...outcome.dependsOn?.length ? { dependsOn: [...new Set(outcome.dependsOn)] } : {},
+      ...outcome.parent ? { parent: outcome.parent } : {},
+      ...outcome.siblings?.length ? { siblings: outcome.siblings } : {} }
     for (const triggerId of triggerIds) {
       const channel = this.repo.triggers.get(triggerId)?.channel
       if (channel && !ticket.channels.some(item => sameChannel(item, channel))) ticket.channels.push(channel)
     }
     ticket = this.options.prepareTicket?.(ticket, outcome) ?? ticket
-    const assignment = this.newAssignment(ticket)
+    // A part of a split request waits without an Assignment until the parts it builds on have ended.
+    const ready = this.dependenciesMet(ticket)
+    const assignment = ready ? this.newAssignment(ticket) : undefined
     this.repo.tickets.save(ticket)
     for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
     if (outcome.acknowledgement && primary) this.replies.acknowledgeAccepted(id, primary, outcome.acknowledgement)
-    this.options.executor.start(this.require(id), assignment)
+    if (assignment) this.options.executor.start(this.require(id), assignment)
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
+  }
+  /**
+   * Replaces an open Ticket with smaller ones that keep its Mandate, for work that keeps failing because it asks for too much
+   * at once. The parts become siblings, the Ticket ends as `dropped` with `reason`, and a part whose dependencies are already
+   * met starts at once. Returns the new Ticket ids.
+   * @throws UserError when the ticket is unknown or has ended, or `parts` names fewer than two.
+   */
+  split(ticketId: string, parts: readonly { title: string; scope: string; name?: string; note?: string; dependsOn?: number[] }[],
+    reason = `Split into ${parts.length} smaller tickets`): string[] {
+    const parent = this.require(ticketId)
+    if (!liveTicket(parent)) throw new UserError('ticketEnded')
+    if (parts.length < 2) throw new Error('A split needs at least two parts')
+    const at = this.now()
+    const ids = parts.map((_, index) => key('ticket', ticketId, 'part', String(index)))
+    parts.forEach((part, index) => {
+      const dependsOn = (part.dependsOn ?? []).flatMap(other => ids[other] ? [ids[other]!] : [])
+      const ticket: Ticket = { id: ids[index]!, title: part.title, decisionId: parent.decisionId,
+        mandate: { ...parent.mandate, scope: part.scope }, channels: [...parent.channels], assignments: [], inputs: [], undelivered: [],
+        createdAt: at, updatedAt: at, origin: parent.origin, siblings: ids,
+        ...index ? { parent: ticketId } : {}, ...dependsOn.length ? { dependsOn } : {} }
+      const assignment = this.dependenciesMet(ticket) ? this.newAssignment(ticket) : undefined
+      this.repo.tickets.save(ticket)
+      if (assignment) this.options.executor.start(ticket, assignment)
+      this.emit('ticket.created', { ticketId: ticket.id, decisionId: parent.decisionId, strength: parent.mandate.strength })
+    })
+    this.end(ticketId, 'executor', 'dropped', at, reason)
+    return ids
   }
   /**
    * Subscribes an open ticket to `thread` and records it in `ticket.follows` (`own` when opened by the ticket).
@@ -360,6 +392,37 @@ export class Tickets extends EnginePart {
     this.letGo(ticketId, waiting, left)
     this.emit('ticket.ended', { ticketId, by, outcome, ...why })
     for (const assignment of stopping) this.options.executor.stop(ticket, assignment, reason ?? outcome)
+    this.releaseDependents(ticketId)
+    this.completeGroup(ticket)
+  }
+  /**
+   * Reports a split request whose every part has ended, so the main Session tells the person once rather than once per part.
+   * A part still open, or one that is not a part of a split, reports nothing.
+   */
+  private completeGroup(ticket: Ticket): void {
+    const siblings = ticket.siblings ?? []
+    if (siblings.length < 2) return
+    const parts = siblings.map(id => this.repo.tickets.get(id))
+    if (parts.some(part => !part || liveTicket(part))) return
+    this.emit('group.ended', { decisionId: ticket.decisionId,
+      parts: parts.map(part => ({ id: part!.id, title: part!.title, outcome: part!.ended!.outcome })) })
+  }
+  /** True when every Ticket this one names has ended; a dependency that no longer exists counts as ended. */  dependenciesMet(ticket: Ticket): boolean {
+    return (ticket.dependsOn ?? []).every(id => {
+      const dependency = this.repo.tickets.get(id)
+      return !dependency || !liveTicket(dependency)
+    })
+  }
+  /** Starts the parts of a split request whose last dependency ended with this Ticket. */
+  private releaseDependents(endedId: string): void {
+    for (const ticket of this.repo.tickets.open()) {
+      if (!ticket.dependsOn?.includes(endedId) || !this.dependenciesMet(ticket) || latestAssignment(ticket)) continue
+      const assignment = this.newAssignment(ticket)
+      ticket.updatedAt = this.now()
+      this.repo.tickets.save(ticket)
+      this.options.executor.start(ticket, assignment)
+      this.emit('ticket.released', { ticketId: ticket.id, after: endedId })
+    }
   }
   /**
    * Whether a ticket's work has not finished at a close at `at`: its worker took up a person's message the ticket decides and
